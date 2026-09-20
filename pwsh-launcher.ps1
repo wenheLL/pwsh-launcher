@@ -340,13 +340,15 @@ $tabs.DrawMode = 'OwnerDrawFixed'
 $tabLauncher = New-Object System.Windows.Forms.TabPage
 $tabLauncher.Text = '启动器'
 $tabLauncher.Tag = 'launcher'   # 会话页的 Tag 是会话对象，用这个区分「不要画关闭按钮」
-$tabLauncher.UseVisualStyleBackColor = $true
+$tabLauncher.UseVisualStyleBackColor = $false
+$tabLauncher.BackColor = [System.Drawing.Color]::White   # 跟活动标签同色，视觉上连成一片
 $tabs.TabPages.Add($tabLauncher)
 
 $edge = ScaleInt 12
 $launcherPanel = New-Object System.Windows.Forms.Panel
 $launcherPanel.Dock = 'Fill'
 $launcherPanel.Padding = New-Object System.Windows.Forms.Padding($edge, (ScaleInt 10), $edge, (ScaleInt 10))
+$launcherPanel.BackColor = [System.Drawing.Color]::White
 $tabLauncher.Controls.Add($launcherPanel)
 
 # 左右两栏装进 SplitContainer：中间那条分隔条可以直接左右拖，改两栏宽度比例。
@@ -590,16 +592,54 @@ $chkEmbedded.add_CheckedChanged({
   })
 
 # ---------------------------------------------------------------- 标签页自绘
+# ---------------------------------------------------------------- 标签页自绘（仿 Chrome）
 
-# WinForms 的 TabControl 原生不支持「标签上带关闭按钮」，只能自己画、自己判点击。
-# 会话页（Tag 是会话对象）右侧画一个 ✕；启动器页（Tag 是字符串）不画。
+# WinForms 的 TabControl 原生画法带 3D 边框和阴影，很难看；这里整条标签栏都自己画：
+#   标签栏底色（跟随系统强调色调淡）+ 未选中标签只显示文字和分隔线 +
+#   活动标签是白色圆角块（跟下面内容区连成一片）+ ✕ 悬停时带圆形底色。
+# 关闭按钮也得自己判点击位置，因为它是画上去的，不是控件。
 
+# 只给上方两个角加圆角：Chrome 的活动标签就是这种"上半圆角、底部跟内容连成一片"
+function New-RoundedTopPath {
+  param([double]$X, [double]$Y, [double]$Width, [double]$Height, [double]$Radius)
+  $path = New-Object System.Drawing.Drawing2D.GraphicsPath
+  $d = $Radius * 2
+  $path.AddArc($X, $Y, $d, $d, 180, 90)
+  $path.AddArc(($X + $Width - $d), $Y, $d, $d, 270, 90)
+  $path.AddLine(($X + $Width), ($Y + $Radius), ($X + $Width), ($Y + $Height))
+  $path.AddLine(($X + $Width), ($Y + $Height), $X, ($Y + $Height))
+  $path.AddLine($X, ($Y + $Height), $X, ($Y + $Radius))
+  $path.CloseFigure()
+  return $path
+}
+
+# 标签栏底色：跟 Chrome 一样沾一点系统强调色（很淡），取不到就用中性浅灰蓝
+function Get-TabStripColor {
+  $fallback = [System.Drawing.Color]::FromArgb(222, 226, 233)
+  try {
+    $accent = (Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\DWM' -Name AccentColor -ErrorAction Stop).AccentColor
+    # AccentColor 是 0xAABBGGRR
+    $r = $accent -band 0xFF
+    $g = ($accent -shr 8) -band 0xFF
+    $b = ($accent -shr 16) -band 0xFF
+    if ($r -eq 0 -and $g -eq 0 -and $b -eq 0) { return $fallback }
+    $mix = 0.14   # 只混一点点，保证是"很淡的一层"
+    $nr = [int]($r * $mix + 255 * (1 - $mix))
+    $ng = [int]($g * $mix + 255 * (1 - $mix))
+    $nb = [int]($b * $mix + 255 * (1 - $mix))
+    return [System.Drawing.Color]::FromArgb($nr, $ng, $nb)
+  } catch {
+    return $fallback
+  }
+}
+$script:TabStripColor = Get-TabStripColor
+
+# ✕ 的矩形：画和判点击都用它，免得两边算错位
 function Get-TabCloseRect {
   param([System.Drawing.Rectangle]$TabRect)
-  $size = ScaleInt 16
-  $right = $TabRect.Right - (ScaleInt 8)
-  $x = $right - $size
-  $y = $TabRect.Top + [int](($TabRect.Height - $size) / 2)
+  $size = ScaleInt 18
+  $x = $TabRect.Right - (ScaleInt 30)
+  $y = $TabRect.Y + [int](($TabRect.Height - $size) / 2) + (ScaleInt 3)
   return New-Object System.Drawing.Rectangle($x, $y, $size, $size)
 }
 
@@ -617,40 +657,72 @@ $tabs.add_DrawItem({
     if ($e.Index -lt 0 -or $e.Index -ge $tabs.TabPages.Count) { return }
     $page = $tabs.TabPages[$e.Index]
     $rect = $e.Bounds
-    $selected = ($tabs.SelectedIndex -eq $e.Index)
     $g = $e.Graphics
+    $selected = ($tabs.SelectedIndex -eq $e.Index)
+    $hovered = ($script:TabHoverIndex -eq $e.Index)
+    $isSession = Test-IsSessionPage $page
+    $radius = ScaleInt 9
 
-    # 底：选中白、未选中浅灰，营造"选中那张跟内容区连成一片"的效果
-    $bgColor = if ($selected) { [System.Drawing.Color]::White } else { [System.Drawing.Color]::FromArgb(238, 238, 238) }
-    $fgColor = if ($selected) { [System.Drawing.Color]::FromArgb(20, 20, 20) } else { [System.Drawing.Color]::FromArgb(95, 95, 95) }
-    $bgBrush = New-Object System.Drawing.SolidBrush($bgColor)
-    $g.FillRectangle($bgBrush, $rect)
-    $bgBrush.Dispose()
+    # 1) 先铺标签栏底色，把原生那层 3D 边框盖掉；
+    #    第一个标签左侧、最后一个标签右侧的空档也一并铺到控件边缘
+    $stripBrush = New-Object System.Drawing.SolidBrush($script:TabStripColor)
+    $g.FillRectangle($stripBrush, $rect)
+    if ($e.Index -eq 0 -and $rect.Left -gt 0) {
+      $g.FillRectangle($stripBrush, 0, $rect.Top, $rect.Left, $rect.Height)
+    }
+    if ($e.Index -eq $tabs.TabPages.Count - 1 -and $rect.Right -lt $tabs.Width) {
+      $g.FillRectangle($stripBrush, $rect.Right, $rect.Top, ($tabs.Width - $rect.Right), $rect.Height)
+    }
+    $stripBrush.Dispose()
 
+    # 2) 标签本体
     if ($selected) {
-      $borderPen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(205, 205, 205))
-      $g.DrawLine($borderPen, $rect.Left, $rect.Top, $rect.Right - 1, $rect.Top)
-      $g.DrawLine($borderPen, $rect.Left, $rect.Top, $rect.Left, $rect.Bottom - 1)
-      $g.DrawLine($borderPen, $rect.Right - 1, $rect.Top, $rect.Right - 1, $rect.Bottom - 1)
-      $borderPen.Dispose()
+      $path = New-RoundedTopPath $rect.X ($rect.Y + (ScaleInt 4)) ($rect.Width - 1) ($rect.Height - (ScaleInt 4)) $radius
+      $brush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::White)
+      $g.FillPath($brush, $path)
+      $brush.Dispose(); $path.Dispose()
+    } elseif ($hovered) {
+      $path = New-RoundedTopPath ($rect.X + (ScaleInt 3)) ($rect.Y + (ScaleInt 7)) ($rect.Width - (ScaleInt 7)) ($rect.Height - (ScaleInt 7)) $radius
+      $brush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(110, 255, 255, 255))
+      $g.FillPath($brush, $path)
+      $brush.Dispose(); $path.Dispose()
+    } else {
+      # 未选中：不画底，只在两个"都不是活动标签"的相邻标签之间画一条细分隔线
+      $next = $e.Index + 1
+      if ($next -lt $tabs.TabPages.Count -and $next -ne $tabs.SelectedIndex -and $script:TabHoverIndex -ne $next) {
+        $pen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(150, 160, 172), 1)
+        $g.DrawLine($pen, ($rect.Right - 1), ($rect.Y + (ScaleInt 10)), ($rect.Right - 1), ($rect.Bottom - (ScaleInt 10)))
+        $pen.Dispose()
+      }
     }
 
-    $reserve = if (Test-IsSessionPage $page) { ScaleInt 28 } else { 0 }
-    $textWidth = [Math]::Max(10, $rect.Width - $reserve - (ScaleInt 12))
-    $textRect = New-Object System.Drawing.Rectangle(($rect.X + (ScaleInt 10)), $rect.Y, $textWidth, $rect.Height)
+    # 3) 文字
+    $fgColor = if ($selected) { [System.Drawing.Color]::FromArgb(32, 33, 36) } else { [System.Drawing.Color]::FromArgb(68, 71, 75) }
+    $reserve = if ($isSession) { ScaleInt 30 } else { 0 }
+    $textRect = New-Object System.Drawing.Rectangle(
+      ($rect.X + (ScaleInt 15)),
+      ($rect.Y + (ScaleInt 4)),
+      [Math]::Max(10, $rect.Width - $reserve - (ScaleInt 20)),
+      ($rect.Height - (ScaleInt 4)))
     [System.Windows.Forms.TextRenderer]::DrawText($g, $page.Text, $tabs.Font, $textRect, $fgColor,
       ([System.Windows.Forms.TextFormatFlags]::Left -bor
        [System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor
        [System.Windows.Forms.TextFormatFlags]::EndEllipsis))
 
-    if (Test-IsSessionPage $page) {
+    # 4) ✕（悬停时加个圆形底色，跟 Chrome 一样）
+    if ($isSession) {
       $closeRect = Get-TabCloseRect $rect
-      $hovered = ($script:TabHoverIndex -eq $e.Index -and $script:TabHoverClose)
-      $closeColor = if ($hovered) { [System.Drawing.Color]::FromArgb(200, 40, 40) } else { [System.Drawing.Color]::FromArgb(125, 125, 125) }
-      $pen = New-Object System.Drawing.Pen($closeColor, [float][Math]::Max(1.5, $tabs.Font.Size / 7))
-      $inset = ScaleInt 5
-      $g.DrawLine($pen, ($closeRect.Left + $inset), ($closeRect.Top + $inset), ($closeRect.Right - $inset), ($closeRect.Bottom - $inset))
-      $g.DrawLine($pen, ($closeRect.Right - $inset), ($closeRect.Top + $inset), ($closeRect.Left + $inset), ($closeRect.Bottom - $inset))
+      $closeHovered = ($hovered -and $script:TabHoverClose)
+      if ($closeHovered) {
+        $brush = New-Object System.Drawing.SolidBrush([System.Drawing.Color]::FromArgb(205, 210, 216))
+        $g.FillEllipse($brush, $closeRect)
+        $brush.Dispose()
+      }
+      $inkColor = if ($closeHovered) { [System.Drawing.Color]::FromArgb(32, 33, 36) } else { [System.Drawing.Color]::FromArgb(95, 99, 104) }
+      $pen = New-Object System.Drawing.Pen($inkColor, 1.6)
+      $inset = (ScaleInt 6)
+      $g.DrawLine($pen, ($closeRect.X + $inset), ($closeRect.Y + $inset), ($closeRect.Right - $inset), ($closeRect.Bottom - $inset))
+      $g.DrawLine($pen, ($closeRect.Right - $inset), ($closeRect.Y + $inset), ($closeRect.X + $inset), ($closeRect.Bottom - $inset))
       $pen.Dispose()
     }
   })
@@ -690,8 +762,16 @@ $tabs.add_MouseDown({
       $page = $tabs.TabPages[$i]
       if ((Test-IsSessionPage $page) -and (Get-TabCloseRect $r).Contains($e.Location)) {
         Close-TerminalSession -Session $page.Tag   # 点 ✕：关掉这个会话
+        return
       }
-      break
+      # 切页之后把焦点交给内容区：一是符合直觉，二是免得 TabControl 拿到焦点后
+      # 在标签上画出那个虚线焦点框（挺丑的）
+      if (Test-IsSessionPage $page) {
+        try { if ($page.Controls.Count -gt 0) { $page.Controls[0].Focus() } } catch { }
+      } else {
+        try { $lstFolders.Focus() } catch { }
+      }
+      return
     }
   })
 
