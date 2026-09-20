@@ -233,6 +233,54 @@ function Open-EmbeddedSession {
   $lblStatus.Text = "已在启动器内打开：$Directory"
 }
 
+# 以管理员身份开一个会话（会弹 UAC）。
+#
+# 【为什么这条只能是独立窗口、进不了标签页】
+# 管理员会话 = 高完整性级别的进程。Windows 不允许给一个已经在跑的进程"就地提权"，
+# 唯一的办法是让 ShellExecute 用 runas 动词【另起一个新进程】，也就是那个 UAC 弹窗。
+# 而我们的内嵌终端是自己 CreatePseudoConsole 造出来的：非提权父进程创建不出提权子进程
+# （ConPTY 也跨不过完整性级别）。两件事互斥 —— 所以管理员会话必然是个独立窗口，
+# 而且任务栏分组也跟普通窗口分开（这就是"管理员窗口长得不一样"的原因）。
+#
+# 真要连着 UAC 弹窗都省掉、还要内嵌，做法是：先提权起一个常驻的"helper"进程当管道服务端，
+# 由它在提权上下文里建 ConPTY，再把字节流通过命名管道喂回启动器。那是另一个量级的工程，
+# 而且等于长时间常驻一个管理员进程 —— 不值得。
+function Start-ElevatedShell {
+  [CmdletBinding(SupportsShouldProcess)]
+  param([string]$Directory, [string]$Command = '')
+
+  if (-not (Test-Path -LiteralPath $Directory)) {
+    [System.Windows.Forms.MessageBox]::Show("文件夹不存在了：`n$Directory", 'pwsh 启动器', 'OK', 'Warning') | Out-Null
+    return
+  }
+  if (-not (Test-Path -LiteralPath $OpenShellScript)) {
+    [System.Windows.Forms.MessageBox]::Show("找不到 open-shell.ps1：`n$OpenShellScript", 'pwsh 启动器', 'OK', 'Error') | Out-Null
+    return
+  }
+
+  $pwshPath = (Get-Process -Id $PID).Path
+  $title = (Split-Path -Leaf $Directory) + ' (管理员)'
+  $shellArgs = @('-NoLogo', '-NoExit', '-File', $OpenShellScript, '-Directory', $Directory)
+  if (-not [string]::IsNullOrWhiteSpace($Command)) { $shellArgs += @('-Command', $Command) }
+  $shellArgs += @('-WindowTitle', $title)
+  # Start-Process 不负责加引号，带空格的参数得自己补
+  $argumentLine = ($shellArgs | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '
+  Write-Verbose "提权启动: $pwshPath $argumentLine"
+
+  if ($PSCmdlet.ShouldProcess($Directory, '以管理员身份打开 pwsh')) {
+    try {
+      # -Verb RunAs 就是资源管理器右键里的"以管理员身份运行"
+      Start-Process -FilePath $pwshPath -ArgumentList $argumentLine -WorkingDirectory $Directory -Verb RunAs
+      $lblStatus.Text = "已请求管理员权限（请在 UAC 弹窗里确认）：$Directory"
+    } catch {
+      # 用户在 UAC 里点了"否"会走到这里
+      [System.Windows.Forms.MessageBox]::Show(
+        "提权失败（UAC 里点了取消？）：`n$($_.Exception.Message)", 'pwsh 启动器', 'OK', 'Warning') | Out-Null
+      $lblStatus.Text = '未提权：UAC 被取消'
+    }
+  }
+}
+
 function Start-PrefilledShell {
   param([string]$Directory, [string]$Command)
 
@@ -242,6 +290,12 @@ function Start-PrefilledShell {
   }
   if (-not (Test-Path -LiteralPath $OpenShellScript)) {
     [System.Windows.Forms.MessageBox]::Show("找不到 open-shell.ps1：`n$OpenShellScript", 'pwsh 启动器', 'OK', 'Error') | Out-Null
+    return
+  }
+
+  # 管理员模式优先：走提权新进程，内嵌/WT 都让位（系统限制见 Start-ElevatedShell 的注释）
+  if ($chkAdmin -and $chkAdmin.Checked) {
+    Start-ElevatedShell -Directory $Directory -Command $Command
     return
   }
 
@@ -475,7 +529,16 @@ $chkEmbedded.Enabled = [bool]$script:TerminalHost
 $chkEmbedded.Margin = New-Object System.Windows.Forms.Padding(0, 7, 0, 3)
 if (-not $script:TerminalHost) { $chkEmbedded.Text = '在启动器内打开（不可用，见下方提示）' }
 
-$flowLeft.Controls.AddRange(@($btnAdd, $btnRemove, $btnExplorer, $btnEmpty, $chkEmbedded))
+# 需要管理员权限的命令：Windows 不允许把当前进程提权，只能另起一个提权进程，
+# 所以这种会话只能是独立窗口（也进不了标签页），勾上之后「打开 pwsh」会弹 UAC。
+$chkAdmin = New-Object System.Windows.Forms.CheckBox
+$chkAdmin.Text = '以管理员身份（UAC）'
+$chkAdmin.AutoSize = $true
+$chkAdmin.Margin = New-Object System.Windows.Forms.Padding(16, 7, 0, 3)
+$chkTip = New-Object System.Windows.Forms.ToolTip
+$chkTip.SetToolTip($chkAdmin, "勾上之后用「以管理员身份运行」打开新会话：`n会弹 UAC，而且是独立窗口（系统限制，没法嵌进标签页）。")
+
+$flowLeft.Controls.AddRange(@($btnAdd, $btnRemove, $btnExplorer, $btnEmpty, $chkEmbedded, $chkAdmin))
 
 $lblCommands = New-Object System.Windows.Forms.Label
 $lblCommands.Text = '命令（来自该文件夹的 package.json）'
@@ -643,6 +706,16 @@ $chkEmbedded.add_CheckedChanged({
     # 只影响之后新开的会话，已经开着的标签页不动
     $script:UseEmbedded = $chkEmbedded.Checked
     $lblStatus.Text = if ($chkEmbedded.Checked) { '新会话将开在启动器内' } else { '新会话将开到 Windows Terminal' }
+  })
+
+$chkAdmin.add_CheckedChanged({
+    if ($chkAdmin.Checked) {
+      $lblStatus.Text = '新会话将以管理员身份打开（会弹 UAC，且是独立窗口）'
+    } elseif ($script:UseEmbedded) {
+      $lblStatus.Text = '新会话将开在启动器内'
+    } else {
+      $lblStatus.Text = '新会话将开到 Windows Terminal'
+    }
   })
 
 # ---------------------------------------------------------------- 标签页自绘
