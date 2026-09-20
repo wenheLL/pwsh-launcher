@@ -1,0 +1,10 @@
+# 纯 Windows 工具：换行一律钉成 CRLF。
+# .ps1 还必须是 UTF-8 BOM —— 无 BOM 时 Windows PowerShell 5.1 会按 GBK 读，
+# 中文注释能把下一行代码吞进注释里（真发生过，见 README 维护备忘）。
+* text=auto eol=crlf
+
+# 二进制别当文本处理
+*.ico binary
+*.png binary
+*.dll binary
+*.exe binary
