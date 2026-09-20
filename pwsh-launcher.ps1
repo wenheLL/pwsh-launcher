@@ -326,9 +326,20 @@ $form.add_HandleCreated({
 # 所有终端都长在启动器窗口里，任务栏永远只有这一个按钮。
 $tabs = New-Object System.Windows.Forms.TabControl
 $tabs.Dock = 'Fill'
+# 标签本身做大一点：字体大一档 + 内边距，不然默认那一条又矮又小不好点
+try { $tabs.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 10.5) } catch { }
+$tabs.Padding = New-Object System.Drawing.Point((ScaleInt 16), (ScaleInt 7))
+# 固定宽度：Normal 模式是按文字宽度算的，不会算上右侧给 ✕ 预留的位置，
+# 结果标签文字会被截成 "ja..."（实测）。固定宽度让文字和 ✕ 都有地方放。
+$tabs.ItemSize = New-Object System.Drawing.Size((ScaleInt 190), (ScaleInt 32))
+$tabs.SizeMode = 'Fixed'
+$tabs.ShowToolTips = $true     # 会话页的 ToolTipText 放完整路径
+# 自绘标签：WinForms 原生不支持「标签上带关闭按钮」，得自己画 + 自己判点击位置
+$tabs.DrawMode = 'OwnerDrawFixed'
 
 $tabLauncher = New-Object System.Windows.Forms.TabPage
 $tabLauncher.Text = '启动器'
+$tabLauncher.Tag = 'launcher'   # 会话页的 Tag 是会话对象，用这个区分「不要画关闭按钮」
 $tabLauncher.UseVisualStyleBackColor = $true
 $tabs.TabPages.Add($tabLauncher)
 
@@ -576,6 +587,112 @@ $chkEmbedded.add_CheckedChanged({
     # 只影响之后新开的会话，已经开着的标签页不动
     $script:UseEmbedded = $chkEmbedded.Checked
     $lblStatus.Text = if ($chkEmbedded.Checked) { '新会话将开在启动器内' } else { '新会话将开到 Windows Terminal' }
+  })
+
+# ---------------------------------------------------------------- 标签页自绘
+
+# WinForms 的 TabControl 原生不支持「标签上带关闭按钮」，只能自己画、自己判点击。
+# 会话页（Tag 是会话对象）右侧画一个 ✕；启动器页（Tag 是字符串）不画。
+
+function Get-TabCloseRect {
+  param([System.Drawing.Rectangle]$TabRect)
+  $size = ScaleInt 16
+  $right = $TabRect.Right - (ScaleInt 8)
+  $x = $right - $size
+  $y = $TabRect.Top + [int](($TabRect.Height - $size) / 2)
+  return New-Object System.Drawing.Rectangle($x, $y, $size, $size)
+}
+
+function Test-IsSessionPage {
+  param($Page)
+  if ($null -eq $Page) { return $false }
+  return (-not ($Page.Tag -is [string])) -and ($null -ne $Page.Tag)
+}
+
+$script:TabHoverIndex = -1
+$script:TabHoverClose = $false
+
+$tabs.add_DrawItem({
+    param($sender, $e)
+    if ($e.Index -lt 0 -or $e.Index -ge $tabs.TabPages.Count) { return }
+    $page = $tabs.TabPages[$e.Index]
+    $rect = $e.Bounds
+    $selected = ($tabs.SelectedIndex -eq $e.Index)
+    $g = $e.Graphics
+
+    # 底：选中白、未选中浅灰，营造"选中那张跟内容区连成一片"的效果
+    $bgColor = if ($selected) { [System.Drawing.Color]::White } else { [System.Drawing.Color]::FromArgb(238, 238, 238) }
+    $fgColor = if ($selected) { [System.Drawing.Color]::FromArgb(20, 20, 20) } else { [System.Drawing.Color]::FromArgb(95, 95, 95) }
+    $bgBrush = New-Object System.Drawing.SolidBrush($bgColor)
+    $g.FillRectangle($bgBrush, $rect)
+    $bgBrush.Dispose()
+
+    if ($selected) {
+      $borderPen = New-Object System.Drawing.Pen([System.Drawing.Color]::FromArgb(205, 205, 205))
+      $g.DrawLine($borderPen, $rect.Left, $rect.Top, $rect.Right - 1, $rect.Top)
+      $g.DrawLine($borderPen, $rect.Left, $rect.Top, $rect.Left, $rect.Bottom - 1)
+      $g.DrawLine($borderPen, $rect.Right - 1, $rect.Top, $rect.Right - 1, $rect.Bottom - 1)
+      $borderPen.Dispose()
+    }
+
+    $reserve = if (Test-IsSessionPage $page) { ScaleInt 28 } else { 0 }
+    $textWidth = [Math]::Max(10, $rect.Width - $reserve - (ScaleInt 12))
+    $textRect = New-Object System.Drawing.Rectangle(($rect.X + (ScaleInt 10)), $rect.Y, $textWidth, $rect.Height)
+    [System.Windows.Forms.TextRenderer]::DrawText($g, $page.Text, $tabs.Font, $textRect, $fgColor,
+      ([System.Windows.Forms.TextFormatFlags]::Left -bor
+       [System.Windows.Forms.TextFormatFlags]::VerticalCenter -bor
+       [System.Windows.Forms.TextFormatFlags]::EndEllipsis))
+
+    if (Test-IsSessionPage $page) {
+      $closeRect = Get-TabCloseRect $rect
+      $hovered = ($script:TabHoverIndex -eq $e.Index -and $script:TabHoverClose)
+      $closeColor = if ($hovered) { [System.Drawing.Color]::FromArgb(200, 40, 40) } else { [System.Drawing.Color]::FromArgb(125, 125, 125) }
+      $pen = New-Object System.Drawing.Pen($closeColor, [float][Math]::Max(1.5, $tabs.Font.Size / 7))
+      $inset = ScaleInt 5
+      $g.DrawLine($pen, ($closeRect.Left + $inset), ($closeRect.Top + $inset), ($closeRect.Right - $inset), ($closeRect.Bottom - $inset))
+      $g.DrawLine($pen, ($closeRect.Right - $inset), ($closeRect.Top + $inset), ($closeRect.Left + $inset), ($closeRect.Bottom - $inset))
+      $pen.Dispose()
+    }
+  })
+
+$tabs.add_MouseMove({
+    param($sender, $e)
+    $index = -1
+    $onClose = $false
+    for ($i = 0; $i -lt $tabs.TabPages.Count; $i++) {
+      $r = $tabs.GetTabRect($i)
+      if ($r.Contains($e.Location)) {
+        $index = $i
+        if (Test-IsSessionPage $tabs.TabPages[$i]) { $onClose = (Get-TabCloseRect $r).Contains($e.Location) }
+        break
+      }
+    }
+    $tabs.Cursor = if ($onClose) { [System.Windows.Forms.Cursors]::Hand } else { [System.Windows.Forms.Cursors]::Default }
+    if ($index -ne $script:TabHoverIndex -or $onClose -ne $script:TabHoverClose) {
+      $script:TabHoverIndex = $index
+      $script:TabHoverClose = $onClose
+      $tabs.Invalidate()
+    }
+  })
+
+$tabs.add_MouseLeave({
+    $script:TabHoverIndex = -1
+    $script:TabHoverClose = $false
+    $tabs.Invalidate()
+  })
+
+$tabs.add_MouseDown({
+    param($sender, $e)
+    if ($e.Button -ne [System.Windows.Forms.MouseButtons]::Left) { return }
+    for ($i = 0; $i -lt $tabs.TabPages.Count; $i++) {
+      $r = $tabs.GetTabRect($i)
+      if (-not $r.Contains($e.Location)) { continue }
+      $page = $tabs.TabPages[$i]
+      if ((Test-IsSessionPage $page) -and (Get-TabCloseRect $r).Contains($e.Location)) {
+        Close-TerminalSession -Session $page.Tag   # 点 ✕：关掉这个会话
+      }
+      break
+    }
   })
 
 # 终端输出搬运工：ConPTY 的读线程只往队列塞字节，

@@ -88,35 +88,16 @@ function New-TerminalSession {
   $page = New-Object System.Windows.Forms.TabPage
   $page.Text = $Title
   $page.BackColor = [System.Drawing.Color]::FromArgb(12, 12, 12)
-
-  $header = New-Object System.Windows.Forms.Panel
-  $header.Dock = 'Top'
-  $header.Height = 26
-  $header.BackColor = [System.Drawing.Color]::FromArgb(243, 243, 243)
-
-  $lblPath = New-Object System.Windows.Forms.Label
-  $lblPath.Text = $Directory
-  $lblPath.AutoSize = $true
-  $lblPath.Dock = 'Left'
-  $lblPath.TextAlign = 'MiddleLeft'
-  $lblPath.Padding = New-Object System.Windows.Forms.Padding(6, 4, 0, 0)
-
-  $btnClose = New-Object System.Windows.Forms.Button
-  $btnClose.Text = '关闭'
-  $btnClose.Dock = 'Right'
-  $btnClose.Width = 64
-  $btnClose.FlatStyle = 'Flat'
+  # 完整路径放标签的悬停提示里（标签上只显示文件夹名，放不下整条路径）
+  $page.ToolTipText = $Directory
 
   $webView = New-Object Microsoft.Web.WebView2.WinForms.WebView2
   $webView.Dock = 'Fill'
   # 页面加载前先铺成终端底色，免得闪一下白
   $webView.DefaultBackgroundColor = [System.Drawing.Color]::FromArgb(12, 12, 12)
 
-  # 停靠顺序：Fill 的先加，Top 的后加（后加的先生效，占走顶部）
+  # 终端铺满整页：关闭按钮在标签上（pwsh-launcher.ps1 里自绘），页面里不再放标题栏
   $page.Controls.Add($webView)
-  $page.Controls.Add($header)
-  $header.Controls.Add($lblPath)
-  $header.Controls.Add($btnClose)
   $Tabs.TabPages.Add($page)
 
   $session = [pscustomobject]@{
@@ -129,6 +110,8 @@ function New-TerminalSession {
     Title       = $Title
     Directory   = $Directory
   }
+  # 标签页自绘 / 点击关闭都靠这个 Tag 认人（字符串 Tag 表示"不是会话页"）
+  $page.Tag = $session
 
   # ---- 起 pwsh（伪控制台，没有窗口）----
   $shellArgs = @('-NoLogo', '-NoExit', '-File', ('"' + $OpenShellScript + '"'), '-Directory', ('"' + $Directory + '"'))
@@ -143,7 +126,6 @@ function New-TerminalSession {
   # （实测 $webView 变成 $null，于是 SetVirtualHostNameToFolderMapping 报 "null-valued expression"，
   #  表现就是标签页一片黑、什么都不渲染）。
   $webView.Tag = $session
-  $btnClose.Tag = $session
 
   $webView.add_CoreWebView2InitializationCompleted({
       param($sender, $e)
@@ -182,8 +164,6 @@ function New-TerminalSession {
       $core.Navigate('https://' + $script:TerminalHost.VirtualHost + '/web/terminal.html')
     })
   $webView.EnsureCoreWebView2Async($TerminalHost.Environment) | Out-Null
-
-  $btnClose.add_Click({ param($sender, $e) Close-TerminalSession -Session $sender.Tag })
 
   return $session
 }

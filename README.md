@@ -13,6 +13,7 @@
 - 没有 `package.json` 就退回 `git status -sb` / `git pull --ff-only`
 - 选中命令后双击或回车 → 新窗口里 `cd` 到该目录并预填命令，**按回车才执行**，执行前还能改
 - **内置终端**（默认）：会话长在启动器自己的标签页里，不需要 Windows Terminal，任务栏始终只有一个按钮
+- 终端标签页**自带 ✕ 关闭按钮**（悬停变红），标签做得比较大好点；完整路径放在标签的悬停提示里
 - 也可以取消勾选「在启动器内打开」，退回「同一个 Windows Terminal 窗口的不同标签页」模式
 - 不常驻、不后台，关掉窗口就结束
 
@@ -74,6 +75,7 @@ pwsh ──(伪控制台/ConPTY)──> 字节流（VT 控制序列）──> We
 - **`CoreWebView2Environment.CreateAsync` 的第一个参数是 `browserExecutableFolder`**（固定版本模式），不是用户数据目录；传 `$null` 才用系统装的 Evergreen 运行时。必须在建窗口之前同步等（等 UI 起来再阻塞会死锁）。
 - `WebView2Loader.dll` 是原生库，得先 `NativeLibrary.Load` 到进程里，托管侧才找得到。
 - 布局用 `Dock` 而不是绝对坐标：`SplitContainer` 改成 `Dock=Fill` 之后，布局前的宽度还是默认值，此时设 `SplitterDistance` 会直接抛异常，得挪到窗口 `Shown` 里设。
+- **标签上的 ✕ 是自绘的**：WinForms 的 `TabControl` 原生没有「标签带关闭按钮」，只能 `DrawMode = OwnerDrawFixed` 自己画，再用 `MouseDown` 判断点没点在 ✕ 上。另外 `SizeMode = Normal` 是按文字宽度算标签宽的，**不会算上自绘 ✕ 的占位**，结果文字被截断成 "ja..."（实测），所以这里用 `Fixed` + `ItemSize` 固定宽度。
 
 ### 已知限制
 
