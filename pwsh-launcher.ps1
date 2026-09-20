@@ -131,6 +131,11 @@ $script:MaxCommands = 14
 
 $script:Folders = New-Object System.Collections.Generic.List[string]
 
+# 启动时左右两栏的默认宽度比例（左栏占窗口宽度的百分比）。
+# 想改就直接改这个数：0.52 = 左栏 52%，0.4 = 左栏 40%。
+# 之后用户仍然可以拖分隔条临时调整，只是不会再记住（重开回到这个值）。
+$script:DefaultSplitRatio = 0.52
+
 # ---------------------------------------------------------------- 配置读写
 
 function Read-FolderConfig {
@@ -543,14 +548,29 @@ $btnOpen.add_Click({
   Start-PrefilledShell -Directory $dir -Command $cmd
 })
 
-# 窗口显示时布局已完成，这时候设分隔条的约束才是安全的
-$form.add_Shown({
-    try {
-      $split.Panel1MinSize = ScaleInt 220
-      $split.Panel2MinSize = ScaleInt 260
-      $split.SplitterDistance = ScaleInt 400
-    } catch { }
-  })
+# 启动时把分隔条放到默认比例位置。
+# 【为什么不在建控件时直接设 SplitterDistance】改成 Dock=Fill 之后，布局之前容器宽度还是默认的 150，
+# 那时候设 400 会直接抛 "SplitterDistance must be between Panel1MinSize and Width - Panel2MinSize"。
+# 所以等窗口布局好（Load）再设 —— Load 在窗口显示之前，看不到跳动；
+# 万一那时宽度还不够（不同 DPI/最小尺寸边界情况），Shown 里再兜一次。
+function Set-DefaultSplitRatio {
+  try {
+    $minLeft = ScaleInt 220
+    $minRight = ScaleInt 260
+    if ($split.Width -le ($minLeft + $minRight + $split.SplitterWidth)) { return $false }
+    $split.Panel1MinSize = $minLeft
+    $split.Panel2MinSize = $minRight
+    $limit = $split.Width - $minRight - $split.SplitterWidth
+    $wanted = [int]($split.Width * $script:DefaultSplitRatio)
+    $split.SplitterDistance = [Math]::Max($minLeft, [Math]::Min($limit, $wanted))
+    return $true
+  } catch {
+    return $false
+  }
+}
+
+$form.add_Load({ [void](Set-DefaultSplitRatio) })
+$form.add_Shown({ [void](Set-DefaultSplitRatio) })
 
 $chkEmbedded.add_CheckedChanged({
     # 只影响之后新开的会话，已经开着的标签页不动
