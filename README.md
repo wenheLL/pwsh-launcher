@@ -78,6 +78,7 @@ pwsh ──(伪控制台/ConPTY)──> 字节流（VT 控制序列）──> We
 - 布局用 `Dock` 而不是绝对坐标：`SplitContainer` 改成 `Dock=Fill` 之后，布局前的宽度还是默认值，此时设 `SplitterDistance` 会直接抛异常，得挪到窗口 `Shown` 里设。
 - **标签上的 ✕ 是自绘的**：WinForms 的 `TabControl` 原生没有「标签带关闭按钮」，只能 `DrawMode = OwnerDrawFixed` 自己画，再用 `MouseDown` 判断点没点在 ✕ 上。另外 `SizeMode = Normal` 是按文字宽度算标签宽的，**不会算上自绘 ✕ 的占位**，结果文字被截断成 "ja..."（实测），所以这里用 `Fixed` + `ItemSize` 固定宽度。
 - **整条标签栏都在 `DrawItem` 里自己刷**：想用 `TabControl.Paint` 刷底色没用 —— 实测控件自己的绘制发生在 `Paint` 之后，会把底色盖掉。所以底色是在每个标签的 `DrawItem` 里铺的，另外第一个标签左侧、最后一个标签右侧的空档也顺手铺到控件边缘。
+- **悬停重画只能失效标签那一小块**：一开始我图省事用 `$tabs.Invalidate()`（不带参数），那是让整个控件失效 —— 底下的终端区域也跟着重画，鼠标在标签和内容之间来回移动时会一直闪（用户实测报过）。现在按受影响的标签矩形 `Invalidate(rect)`，另外给 `TabControl` 反射打开 `DoubleBuffered`（它是 protected，只能用反射设），`Cursor` 也只在真的变了才赋。
 - 活动标签是**上半圆角的白块**（只圆上面两个角，下面跟内容区连成一片），所以启动器页的底色也改成了白色，不然中间会有一道缝。标签栏底色取 `HKCU\Software\Microsoft\Windows\DWM` 的 `AccentColor`（格式 `0xAABBGGRR`）跟白色混 14%，取不到就退回中性浅灰蓝。
 
 ### 已知限制

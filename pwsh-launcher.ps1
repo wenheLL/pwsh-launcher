@@ -336,6 +336,12 @@ $tabs.SizeMode = 'Fixed'
 $tabs.ShowToolTips = $true     # 会话页的 ToolTipText 放完整路径
 # 自绘标签：WinForms 原生不支持「标签上带关闭按钮」，得自己画 + 自己判点击位置
 $tabs.DrawMode = 'OwnerDrawFixed'
+# 自绘 + 悬停重画容易闪，开双缓冲（DoubleBuffered 是 protected，只能反射设）
+try {
+  [System.Windows.Forms.Control].GetProperty('DoubleBuffered',
+    ([System.Reflection.BindingFlags]::Instance -bor [System.Reflection.BindingFlags]::NonPublic)) |
+    ForEach-Object { $_.SetValue($tabs, $true, $null) }
+} catch { }
 
 $tabLauncher = New-Object System.Windows.Forms.TabPage
 $tabLauncher.Text = '启动器'
@@ -652,6 +658,25 @@ function Test-IsSessionPage {
 $script:TabHoverIndex = -1
 $script:TabHoverClose = $false
 
+# 【别用 $tabs.Invalidate() 不带参数】那是让整个控件失效 ——
+# 标签栏底下的页面区域也会跟着重画，鼠标在标签和内容之间来回移动时就会一直闪（实测）。
+# 只失效受影响的那一两个标签所在的小矩形就够了。
+function Update-TabVisuals {
+  param([int]$OldIndex, [int]$NewIndex)
+  $rects = @()
+  foreach ($i in @($OldIndex, $NewIndex)) {
+    if ($i -ge 0 -and $i -lt $tabs.TabPages.Count) { $rects += $tabs.GetTabRect($i) }
+  }
+  if ($rects.Count -eq 0) { return }
+  $left = ($rects | ForEach-Object { $_.Left } | Measure-Object -Minimum).Minimum
+  $top = ($rects | ForEach-Object { $_.Top } | Measure-Object -Minimum).Minimum
+  $right = ($rects | ForEach-Object { $_.Right } | Measure-Object -Maximum).Maximum
+  $bottom = ($rects | ForEach-Object { $_.Bottom } | Measure-Object -Maximum).Maximum
+  # 外扩 2px，免得边缘和相邻分隔线留下残影
+  $tabs.Invalidate((New-Object System.Drawing.Rectangle(
+        ($left - 2), ($top - 2), ($right - $left + 4), ($bottom - $top + 4))))
+}
+
 $tabs.add_DrawItem({
     param($sender, $e)
     if ($e.Index -lt 0 -or $e.Index -ge $tabs.TabPages.Count) { return }
@@ -739,18 +764,23 @@ $tabs.add_MouseMove({
         break
       }
     }
-    $tabs.Cursor = if ($onClose) { [System.Windows.Forms.Cursors]::Hand } else { [System.Windows.Forms.Cursors]::Default }
+    # 只在需要时才动 Cursor，频繁赋值也会触发重绘
+    $wanted = if ($onClose) { [System.Windows.Forms.Cursors]::Hand } else { [System.Windows.Forms.Cursors]::Default }
+    if ($tabs.Cursor -ne $wanted) { $tabs.Cursor = $wanted }
     if ($index -ne $script:TabHoverIndex -or $onClose -ne $script:TabHoverClose) {
+      $old = $script:TabHoverIndex
       $script:TabHoverIndex = $index
       $script:TabHoverClose = $onClose
-      $tabs.Invalidate()
+      Update-TabVisuals -OldIndex $old -NewIndex $index
     }
   })
 
 $tabs.add_MouseLeave({
-    $script:TabHoverIndex = -1
-    $script:TabHoverClose = $false
-    $tabs.Invalidate()
+    if ($script:TabHoverIndex -ge 0) {
+      Update-TabVisuals -OldIndex $script:TabHoverIndex -NewIndex $script:TabHoverIndex
+      $script:TabHoverIndex = -1
+      $script:TabHoverClose = $false
+    }
   })
 
 $tabs.add_MouseDown({
