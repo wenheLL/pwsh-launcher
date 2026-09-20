@@ -1,2 +1,5 @@
 # 本地收藏列表（含个人绝对路径，运行时自动生成，不提交）
 folders.json
+
+# 第三方依赖（WebView2 SDK / xterm.js）和编译产物，由 fetch-deps.ps1 拉取，不进 git
+vendor/

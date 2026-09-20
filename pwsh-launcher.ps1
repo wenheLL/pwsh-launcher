@@ -8,8 +8,10 @@
   - 文件夹列表存在脚本同目录的 folders.json（相对 $PSScriptRoot，整个文件夹挪走也能用）。
   - 右侧命令不需要手工维护：读该文件夹 package.json 的 scripts 生成，常用脚本按优先级排前面。
     没有 package.json 就退回几条通用 git 命令。
-  - 开终端走 wt.exe -w <窗口名> nt，所以所有会话都落在同一个 Windows Terminal 窗口的不同标签页里；
-    想换行为就改 -TerminalWindowName（'0' = 当前 WT 窗口，'-1' = 每次新窗口）。
+  - 开终端默认走内置终端：ConPTY 起一个没有窗口的 pwsh，输出交给 WebView2 里的 xterm.js 渲染，
+    会话以标签页形式长在本窗口里（见 terminal-session.ps1 / web/terminal.html），任务栏只有一个按钮。
+    取消勾选「在启动器内打开」则退回 Windows Terminal 标签页模式，用 wt.exe -w <窗口名> nt，
+    窗口名由 -TerminalWindowName 控制（'0' = 当前 WT 窗口，'-1' = 每次新窗口）。
   - 只负责「开一个终端并把命令敲好」，不常驻、不后台、不碰你的项目进程。
 
 .EXAMPLE
@@ -193,6 +195,37 @@ function ConvertTo-WtLiteral {
   return $Value.Replace('"', '\"').Replace(';', '\;')
 }
 
+# 在启动器自己的标签页里开一个终端（ConPTY + xterm.js）
+function Open-EmbeddedSession {
+  param([string]$Directory, [string]$Command = '')
+
+  $title = Split-Path -Leaf $Directory
+  # 同一个文件夹开第二个会话时，标题加序号，免得标签页重名分不清
+  $used = @($script:Sessions | Where-Object { -not $_.Closed } | ForEach-Object { $_.Title })
+  if ($used -contains $title) {
+    $n = 2
+    while ($used -contains "$title ($n)") { $n++ }
+    $title = "$title ($n)"
+  }
+
+  # 第一次开终端时把窗口撑到能用的尺寸
+  if ($tabs.TabPages.Count -lt 2) {
+    $want = ScaleSize 1180 720
+    if ($form.ClientSize.Width -lt $want.Width -or $form.ClientSize.Height -lt $want.Height) {
+      $form.ClientSize = New-Object System.Drawing.Size(
+        [Math]::Max($form.ClientSize.Width, $want.Width),
+        [Math]::Max($form.ClientSize.Height, $want.Height))
+    }
+  }
+
+  $session = New-TerminalSession -TerminalHost $script:TerminalHost -Tabs $tabs `
+    -Directory $Directory -Command $Command -Title $title `
+    -PwshPath (Get-Process -Id $PID).Path -OpenShellScript $OpenShellScript
+  [void]$script:Sessions.Add($session)
+  $tabs.SelectedTab = $session.Page
+  $lblStatus.Text = "已在启动器内打开：$Directory"
+}
+
 function Start-PrefilledShell {
   param([string]$Directory, [string]$Command)
 
@@ -202,6 +235,13 @@ function Start-PrefilledShell {
   }
   if (-not (Test-Path -LiteralPath $OpenShellScript)) {
     [System.Windows.Forms.MessageBox]::Show("找不到 open-shell.ps1：`n$OpenShellScript", 'pwsh 启动器', 'OK', 'Error') | Out-Null
+    return
+  }
+
+  # 默认开在启动器里（ConPTY，任务栏不留东西）；
+  # 取消勾选或内置终端不可用时，才走下面的 Windows Terminal / 独立窗口。
+  if ($script:UseEmbedded -and $script:TerminalHost) {
+    Open-EmbeddedSession -Directory $Directory -Command $Command
     return
   }
 
@@ -228,10 +268,28 @@ function Start-PrefilledShell {
     }
   }
 
-  # 兜底：没有 wt.exe（或它失败了）就回到「自己开一个窗口」的老办法。
+# 兜底：没有 wt.exe（或它失败了）就回到「自己开一个窗口」的老办法。
   # Start-Process 只做空格拼接，带空格的参数得自己补引号。
   $argumentLine = ($shellArgs | ForEach-Object { if ($_ -match '\s') { '"' + $_ + '"' } else { $_ } }) -join ' '
   Start-Process -FilePath $pwshPath -ArgumentList $argumentLine -WorkingDirectory $Directory
+}
+
+# ---------------------------------------------------------------- 内置终端
+
+# 内置终端 = ConPTY（没有窗口的 pwsh）+ xterm.js（跑在 WebView2 里）。
+# 初始化必须赶在建任何窗口之前：WebView2 环境是同步等待创建的，
+# 等 UI 线程跑起来之后再阻塞会死锁。
+$script:UseEmbedded = $true
+$script:Sessions = New-Object System.Collections.ArrayList
+$script:TerminalHost = $null
+$script:TerminalHostError = ''
+try {
+  . (Join-Path $PSScriptRoot 'terminal-session.ps1')
+  $script:TerminalHost = Initialize-TerminalHost -ProjectRoot $PSScriptRoot
+} catch {
+  # 内置终端起不来不能把启动器整个搞挂：退回到「开 Windows Terminal 标签页」
+  $script:TerminalHostError = $_.Exception.Message
+  $script:UseEmbedded = $false
 }
 
 # ---------------------------------------------------------------- 界面
@@ -239,8 +297,8 @@ function Start-PrefilledShell {
 $form = New-Object System.Windows.Forms.Form
 $form.Text = 'pwsh 启动器'
 $form.AutoScaleMode = 'None' # 缩放自己算，见上面的 ScaleInt/ScalePoint/ScaleSize
-$form.ClientSize = ScaleSize 920 496
-$form.MinimumSize = ScaleSize 780 440
+$form.ClientSize = ScaleSize 1180 720
+$form.MinimumSize = ScaleSize 820 520
 $form.StartPosition = 'CenterScreen'
 try { $form.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9) } catch { }
 
@@ -259,19 +317,34 @@ $form.add_HandleCreated({
     try { [PwshLauncher.AppId]::SetWindowAppId($form.Handle, 'wenheLL.PwshLauncher') } catch { }
   })
 
+# 顶层是标签页：第 0 页是启动器本体，之后每开一个终端会话就多一页 ——
+# 所有终端都长在启动器窗口里，任务栏永远只有这一个按钮。
+$tabs = New-Object System.Windows.Forms.TabControl
+$tabs.Dock = 'Fill'
+
+$tabLauncher = New-Object System.Windows.Forms.TabPage
+$tabLauncher.Text = '启动器'
+$tabLauncher.UseVisualStyleBackColor = $true
+$tabs.TabPages.Add($tabLauncher)
+
+$edge = ScaleInt 12
+$launcherPanel = New-Object System.Windows.Forms.Panel
+$launcherPanel.Dock = 'Fill'
+$launcherPanel.Padding = New-Object System.Windows.Forms.Padding($edge, (ScaleInt 10), $edge, (ScaleInt 10))
+$tabLauncher.Controls.Add($launcherPanel)
+
 # 左右两栏装进 SplitContainer：中间那条分隔条可以直接左右拖，改两栏宽度比例。
-# 底部按钮一律留在表单上（不进左栏面板）——否则左栏被拖窄时按钮会被挤没。
+# 停靠顺序：Fill 的先加，Bottom 的后加（后加的先生效，占走底边）。
 $split = New-Object System.Windows.Forms.SplitContainer
-$split.Location = ScalePoint 12 12
-$split.Size = ScaleSize 896 380
-$split.Anchor = 'Top,Left,Right,Bottom'
+$split.Dock = 'Fill'
 $split.SplitterWidth = ScaleInt 6
-$split.Panel1MinSize = ScaleInt 220
-$split.Panel2MinSize = ScaleInt 260
-$split.SplitterDistance = ScaleInt 400
 $split.Panel1.BorderStyle = 'FixedSingle'
 $split.Panel2.BorderStyle = 'FixedSingle'
 $split.BackColor = [System.Drawing.Color]::FromArgb(235, 235, 235) # 分隔条的颜色：看得出来能拖
+# 注意：Panel1MinSize / Panel2MinSize / SplitterDistance 不能在这里设 ——
+# 现在是 Dock=Fill，布局之前容器宽度还是默认的 150，设 400 会直接抛
+# "SplitterDistance must be between Panel1MinSize and Width - Panel2MinSize"。
+# 挪到窗口 Shown 里设（那时布局已完成，宽度是真的）。
 $panelPadding = New-Object System.Windows.Forms.Padding((ScaleInt 4))
 $split.Panel1.Padding = $panelPadding
 $split.Panel2.Padding = $panelPadding
@@ -290,29 +363,47 @@ $lstFolders.IntegralHeight = $false
 $split.Panel1.Controls.Add($lstFolders)
 $split.Panel1.Controls.Add($lblFolders)
 
+# 底部按钮行：左边一串操作按钮放流式布局，右边「打开 pwsh」贴右。
+# 全用停靠而不是绝对坐标 —— 左右拖动分隔条或改窗口大小时都不会错位。
+$bottomBar = New-Object System.Windows.Forms.Panel
+$bottomBar.Dock = 'Bottom'
+$bottomBar.Height = ScaleInt 36
+
+$flowLeft = New-Object System.Windows.Forms.FlowLayoutPanel
+$flowLeft.Dock = 'Fill'
+$flowLeft.FlowDirection = 'LeftToRight'
+$flowLeft.WrapContents = $false
+
 $btnAdd = New-Object System.Windows.Forms.Button
 $btnAdd.Text = '添加文件夹…'
-$btnAdd.Location = ScalePoint 12 404
-$btnAdd.Size = ScaleSize 130 32
-$btnAdd.Anchor = 'Left,Bottom'
+$btnAdd.Size = ScaleSize 130 30
+$btnAdd.Margin = New-Object System.Windows.Forms.Padding(0, 3, 6, 3)
 
 $btnRemove = New-Object System.Windows.Forms.Button
 $btnRemove.Text = '移除'
-$btnRemove.Location = ScalePoint 150 404
-$btnRemove.Size = ScaleSize 70 32
-$btnRemove.Anchor = 'Left,Bottom'
+$btnRemove.Size = ScaleSize 70 30
+$btnRemove.Margin = New-Object System.Windows.Forms.Padding(0, 3, 6, 3)
 
 $btnExplorer = New-Object System.Windows.Forms.Button
 $btnExplorer.Text = '资源管理器'
-$btnExplorer.Location = ScalePoint 228 404
-$btnExplorer.Size = ScaleSize 110 32
-$btnExplorer.Anchor = 'Left,Bottom'
+$btnExplorer.Size = ScaleSize 110 30
+$btnExplorer.Margin = New-Object System.Windows.Forms.Padding(0, 3, 6, 3)
 
 $btnEmpty = New-Object System.Windows.Forms.Button
 $btnEmpty.Text = '空终端'
-$btnEmpty.Location = ScalePoint 346 404
-$btnEmpty.Size = ScaleSize 66 32
-$btnEmpty.Anchor = 'Left,Bottom'
+$btnEmpty.Size = ScaleSize 66 30
+$btnEmpty.Margin = New-Object System.Windows.Forms.Padding(0, 3, 12, 3)
+
+# 内置终端可用时默认勾上；起不来（缺依赖 / 没装 WebView2 运行时）就灰掉并退回 WT
+$chkEmbedded = New-Object System.Windows.Forms.CheckBox
+$chkEmbedded.Text = '在启动器内打开（新标签页）'
+$chkEmbedded.AutoSize = $true
+$chkEmbedded.Checked = [bool]$script:TerminalHost
+$chkEmbedded.Enabled = [bool]$script:TerminalHost
+$chkEmbedded.Margin = New-Object System.Windows.Forms.Padding(0, 7, 0, 3)
+if (-not $script:TerminalHost) { $chkEmbedded.Text = '在启动器内打开（不可用，见下方提示）' }
+
+$flowLeft.Controls.AddRange(@($btnAdd, $btnRemove, $btnExplorer, $btnEmpty, $chkEmbedded))
 
 $lblCommands = New-Object System.Windows.Forms.Label
 $lblCommands.Text = '命令（来自该文件夹的 package.json）'
@@ -327,19 +418,22 @@ $split.Panel2.Controls.Add($lblCommands)
 
 $btnOpen = New-Object System.Windows.Forms.Button
 $btnOpen.Text = '打开 pwsh（预填选中命令）'
-$btnOpen.Location = ScalePoint 436 404
-$btnOpen.Size = ScaleSize 472 32
-$btnOpen.Anchor = 'Left,Right,Bottom'
+$btnOpen.Dock = 'Right'
+$btnOpen.Width = ScaleInt 300
+$btnOpen.Margin = New-Object System.Windows.Forms.Padding(0)
 
 $lblStatus = New-Object System.Windows.Forms.Label
-$lblStatus.Location = ScalePoint 12 444
-$lblStatus.Size = ScaleSize 896 44
-$lblStatus.Anchor = 'Left,Right,Bottom'
+$lblStatus.Dock = 'Bottom'
+$lblStatus.Height = ScaleInt 24
+$lblStatus.TextAlign = 'MiddleLeft'
 $lblStatus.ForeColor = [System.Drawing.Color]::DimGray
 
-$form.Controls.AddRange(@(
-  $split, $btnAdd, $btnRemove, $btnExplorer, $btnEmpty, $btnOpen, $lblStatus
-))
+$bottomBar.Controls.Add($flowLeft)
+$bottomBar.Controls.Add($btnOpen)
+$launcherPanel.Controls.Add($split)
+$launcherPanel.Controls.Add($bottomBar)
+$launcherPanel.Controls.Add($lblStatus)
+$form.Controls.Add($tabs)
 $form.AcceptButton = $btnOpen
 
 # ---------------------------------------------------------------- 交互逻辑
@@ -449,7 +543,50 @@ $btnOpen.add_Click({
   Start-PrefilledShell -Directory $dir -Command $cmd
 })
 
-$form.add_FormClosing({ Save-FolderConfig })
+# 窗口显示时布局已完成，这时候设分隔条的约束才是安全的
+$form.add_Shown({
+    try {
+      $split.Panel1MinSize = ScaleInt 220
+      $split.Panel2MinSize = ScaleInt 260
+      $split.SplitterDistance = ScaleInt 400
+    } catch { }
+  })
+
+$chkEmbedded.add_CheckedChanged({
+    # 只影响之后新开的会话，已经开着的标签页不动
+    $script:UseEmbedded = $chkEmbedded.Checked
+    $lblStatus.Text = if ($chkEmbedded.Checked) { '新会话将开在启动器内' } else { '新会话将开到 Windows Terminal' }
+  })
+
+# 终端输出搬运工：ConPTY 的读线程只往队列塞字节，
+# 这里在 UI 线程定时取走、再转发给 WebView2（WebView2 只能在 UI 线程调用）。
+$script:PumpTimer = New-Object System.Windows.Forms.Timer
+$script:PumpTimer.Interval = 30
+$script:PumpTimer.add_Tick({
+    foreach ($s in @($script:Sessions)) {
+      if (-not $s.Closed) { Update-TerminalSession -Session $s }
+    }
+  })
+$script:PumpTimer.Start()
+
+$form.add_FormClosing({
+    param($sender, $e)
+    $live = @($script:Sessions | Where-Object { -not $_.Closed -and -not $_.Pty.HasExited })
+    if ($live.Count -gt 0) {
+      $answer = [System.Windows.Forms.MessageBox]::Show(
+        "还有 $($live.Count) 个终端会话在跑。`n关掉启动器会连同它们一起结束，确定吗？",
+        'pwsh 启动器',
+        [System.Windows.Forms.MessageBoxButtons]::YesNo,
+        [System.Windows.Forms.MessageBoxIcon]::Warning)
+      if ($answer -ne [System.Windows.Forms.DialogResult]::Yes) {
+        $e.Cancel = $true
+        return
+      }
+    }
+    try { $script:PumpTimer.Stop() } catch { }
+    foreach ($s in @($script:Sessions)) { Close-TerminalSession -Session $s }
+    Save-FolderConfig
+  })
 
 # ---------------------------------------------------------------- 启动
 
@@ -459,6 +596,9 @@ if ($lstFolders.Items.Count -eq 0) {
   $lblStatus.Text = '还没有常用文件夹 —— 点「添加文件夹…」挑一个（存在本工具目录的 folders.json）'
 } else {
   Update-CommandList
+}
+if ($script:TerminalHostError) {
+  $lblStatus.Text = "内置终端不可用（$($script:TerminalHostError)）—— 会退回用 Windows Terminal 打开"
 }
 
 [void]$form.ShowDialog()

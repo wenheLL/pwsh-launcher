@@ -12,7 +12,8 @@
 - 右边命令**不用手工维护**：读该文件夹 `package.json` 的 `scripts` 生成，常用脚本排前面（dev → build → test → typecheck → lint → dist:win → dist → …），最多 14 条
 - 没有 `package.json` 就退回 `git status -sb` / `git pull --ff-only`
 - 选中命令后双击或回车 → 新窗口里 `cd` 到该目录并预填命令，**按回车才执行**，执行前还能改
-- 所有会话都进**同一个 Windows Terminal 窗口的不同标签页**（用窗口名 `pwsh-launcher` 定位；WT 没开时会自动建一个）
+- **内置终端**（默认）：会话长在启动器自己的标签页里，不需要 Windows Terminal，任务栏始终只有一个按钮
+- 也可以取消勾选「在启动器内打开」，退回「同一个 Windows Terminal 窗口的不同标签页」模式
 - 不常驻、不后台，关掉窗口就结束
 
 ## 环境要求
@@ -48,6 +49,37 @@ pwsh -NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File ".\pwsh-l
 | `create-shortcut.ps1` | 通用 `.lnk` 生成器，文件头有两段可直接复制的用法 |
 | `make-icon.ps1` | 用 GDI+ 画 `icon.ico`（16~256 共 9 个尺寸），改配色/形状就改它再跑一次 |
 | `icon.ico` | 图标本体；快捷方式指向它，窗口也加载它 |
+| `conpty.cs` | 伪控制台封装（C#/P-Invoke）：起无窗口的 pwsh、读输出、写输入、改尺寸 |
+| `terminal-session.ps1` | 把 ConPTY 和 xterm.js 接起来：标签页、消息路由、输出搬运 |
+| `web/terminal.html` | xterm.js 宿主页面（在 WebView2 里跑） |
+| `fetch-deps.ps1` | 下载 WebView2 SDK 和 xterm.js 到 `vendor/`（不进 git） |
+
+## 内置终端是怎么实现的
+
+和 IDEA（pty4j + 自带模拟器）、VS Code（node-pty + xterm.js）是同一个套路，**不是**去复用系统的控制台窗口：
+
+```
+pwsh ──(伪控制台/ConPTY)──> 字节流（VT 控制序列）──> WebView2 里的 xterm.js ──> 画成字符网格
+  ^                                                                              │
+  └──────────────── 键盘输入 ────── postMessage ─────────────────────────────────┘
+```
+
+伪控制台没有窗口，所以任务栏干干净净；VT 序列的解析与绘制交给 xterm.js。
+
+### 关键实现细节（都踩过坑）
+
+- **`CreateProcess` 必须显式 `STARTF_USESTDHANDLES` + 三个句柄给 NULL**。不指定的话，子进程会把*父进程所在控制台*的句柄继承下去：它一边挂在新的伪控制台上（`mode con` 报的是 pty 的尺寸），一边把输出写进父进程的控制台 —— 表现就是"pty 里什么都收不到"。实测不指定时一个字节都拿不到。
+- **ConPTY 的读线程绝不回调 PowerShell**，只往 `ConcurrentQueue` 里塞；UI 线程用 30ms 定时器 `DrainOutput()` 取走再转给 WebView2（WebView2 只能在 UI 线程调，后台线程直接调脚本块还会踩 runspace 亲和性）。
+- **事件回调里不要依赖闭包捕获函数局部变量**。PowerShell 里从函数内部创建的事件处理器，回调触发时局部变量已经取不到了（`$webView` 会是 `$null`），于是 `SetVirtualHostNameToFolderMapping` 报 "null-valued expression"，标签页一片黑。现在统一用 `$sender.Tag` 和按 `CoreWebView2` 反查会话。
+- **`CoreWebView2Environment.CreateAsync` 的第一个参数是 `browserExecutableFolder`**（固定版本模式），不是用户数据目录；传 `$null` 才用系统装的 Evergreen 运行时。必须在建窗口之前同步等（等 UI 起来再阻塞会死锁）。
+- `WebView2Loader.dll` 是原生库，得先 `NativeLibrary.Load` 到进程里，托管侧才找得到。
+- 布局用 `Dock` 而不是绝对坐标：`SplitContainer` 改成 `Dock=Fill` 之后，布局前的宽度还是默认值，此时设 `SplitterDistance` 会直接抛异常，得挪到窗口 `Shown` 里设。
+
+### 已知限制
+
+- 每个会话一个 WebView2 控件，各自有渲染进程（几十 MB 量级），开很多个会吃内存。
+- 会话绑在启动器生命周期上：关掉启动器，里面的会话一起结束（关闭前会确认）。
+- 中文输入法处于**组字状态**时，回车会被输入法吃掉（所有终端都这样），要执行命令先按 Esc 或切到英文输入。
 
 ## 任务栏图标是怎么生效的（重要）
 

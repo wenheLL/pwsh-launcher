@@ -1,0 +1,105 @@
+﻿<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8" />
+<title>terminal</title>
+<link rel="stylesheet" href="../vendor/xterm/xterm.css" />
+<style>
+  html, body { margin: 0; padding: 0; height: 100%; background: #0c0c0c; overflow: hidden; }
+  #host { position: absolute; inset: 0; padding: 2px 0 0 4px; box-sizing: border-box; }
+  .xterm .xterm-viewport { scrollbar-color: #4a4a4a #0c0c0c; }
+</style>
+</head>
+<body>
+<div id="host"></div>
+<script src="../vendor/xterm/xterm.js"></script>
+<script src="../vendor/xterm/addon-fit.js"></script>
+<script>
+(function () {
+  const api = (window.chrome && window.chrome.webview) ? window.chrome.webview : null;
+  function post(msg) { if (api) api.postMessage(msg); }
+
+  const term = new Terminal({
+    allowProposedApi: true,
+    cursorBlink: true,
+    cursorStyle: 'bar',
+    fontFamily: '"Cascadia Mono", "Cascadia Mono PL", Consolas, "Microsoft YaHei Mono", monospace',
+    fontSize: 14,
+    lineHeight: 1.1,
+    scrollback: 10000,
+    theme: {
+      background: '#0c0c0c', foreground: '#cccccc', cursor: '#cccccc',
+      selectionBackground: '#264f78',
+      black: '#0c0c0c', red: '#e74856', green: '#16c60c', yellow: '#f9f1a5',
+      blue: '#3b78ff', magenta: '#b4009e', cyan: '#61d6d6', white: '#cccccc',
+      brightBlack: '#767676', brightRed: '#ff6b6b', brightGreen: '#55ff55',
+      brightYellow: '#ffff55', brightBlue: '#7aa6ff', brightMagenta: '#ff7bff',
+      brightCyan: '#7bffff', brightWhite: '#ffffff'
+    }
+  });
+
+  const fit = new FitAddon.FitAddon();
+  term.loadAddon(fit);
+  term.open(document.getElementById('host'));
+
+  // 暴露给宿主做诊断用（ExecuteScriptAsync 只能看到全局对象）
+  window.__term = term;
+
+  let fitTimer = null;
+  function doFit() {
+    try { fit.fit(); } catch (e) { return; }
+    post({ type: 'resize', cols: term.cols, rows: term.rows });
+  }
+  function scheduleFit() {
+    if (fitTimer) clearTimeout(fitTimer);
+    fitTimer = setTimeout(doFit, 60);
+  }
+  window.addEventListener('resize', scheduleFit);
+
+  term.onData(function (d) { post({ type: 'input', data: d }); });
+
+  // 终端习惯：Ctrl+Shift+C/V 复制粘贴（Ctrl+C 留给 shell 发中断）
+  term.attachCustomKeyEventHandler(function (e) {
+    if (e.type !== 'keydown' || !e.ctrlKey || !e.shiftKey) return true;
+    const k = (e.key || '').toLowerCase();
+    if (k === 'c') {
+      const sel = term.getSelection();
+      if (sel && navigator.clipboard) navigator.clipboard.writeText(sel);
+      return false;
+    }
+    if (k === 'v') {
+      if (navigator.clipboard) {
+        navigator.clipboard.readText().then(function (text) { if (text) term.paste(text); });
+      }
+      return false;
+    }
+    return true;
+  });
+
+  if (api) {
+    api.addEventListener('message', function (ev) {
+      const m = ev.data;
+      if (!m) return;
+      if (m.type === 'output' && m.data) {
+        // 后端给的是 base64 的原始字节：转成 Uint8Array 交给 xterm，
+        // 让它自己做流式的 UTF-8 解码（分片中截断的多字节字符不会乱码）
+        const bin = atob(m.data);
+        const bytes = new Uint8Array(bin.length);
+        for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+        term.write(bytes);
+      } else if (m.type === 'focus') {
+        term.focus();
+      }
+    });
+  }
+
+  // 等布局稳定后再 fit，否则算出来的 cols/rows 是错的
+  requestAnimationFrame(function () {
+    doFit();
+    term.focus();
+    post({ type: 'ready' });
+  });
+})();
+</script>
+</body>
+</html>
