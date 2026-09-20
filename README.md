@@ -31,6 +31,18 @@ pwsh -NoProfile -STA -ExecutionPolicy Bypass -WindowStyle Hidden -File ".\pwsh-l
 
 也可以照上面这行建一个快捷方式，工作目录填本目录，再固定到任务栏。
 
+## 开机（登录）自启动
+
+```powershell
+pwsh -NoProfile -File .\install-autostart.ps1              # 装上：登录后最小化启动
+pwsh -NoProfile -File .\install-autostart.ps1 -ShowWindow  # 装上：登录后直接显示窗口
+pwsh -NoProfile -File .\install-autostart.ps1 -Uninstall   # 取消
+```
+
+- 做法是往「启动」文件夹放一个快捷方式（`%APPDATA%\Microsoft\Windows\Start Menu\Programs\Startup`），**不写注册表 Run 键** —— 好处是任务管理器 →「启动」标签里能直接禁用，取消就是删掉那个 .lnk。
+- 默认最小化启动（`-StartMinimized`），免得每次登录都跳个窗口到脸前；点任务栏图标或桌面快捷方式就出来。
+- **单实例**：已经在跑的时候再启动一次不会开出第二个窗口，而是把原来那个唤到前台（最小化状态会先还原）。
+
 ## 配置
 
 收藏列表在脚本同目录的 `folders.json`（相对 `$PSScriptRoot` 解析，整个文件夹挪走也能用）：
@@ -79,6 +91,7 @@ pwsh ──(伪控制台/ConPTY)──> 字节流（VT 控制序列）──> We
 - **标签上的 ✕ 是自绘的**：WinForms 的 `TabControl` 原生没有「标签带关闭按钮」，只能 `DrawMode = OwnerDrawFixed` 自己画，再用 `MouseDown` 判断点没点在 ✕ 上。另外 `SizeMode = Normal` 是按文字宽度算标签宽的，**不会算上自绘 ✕ 的占位**，结果文字被截断成 "ja..."（实测），所以这里用 `Fixed` + `ItemSize` 固定宽度。
 - **整条标签栏都在 `DrawItem` 里自己刷**：想用 `TabControl.Paint` 刷底色没用 —— 实测控件自己的绘制发生在 `Paint` 之后，会把底色盖掉。所以底色是在每个标签的 `DrawItem` 里铺的，另外第一个标签左侧、最后一个标签右侧的空档也顺手铺到控件边缘。
 - **悬停重画只能失效标签那一小块**：一开始我图省事用 `$tabs.Invalidate()`（不带参数），那是让整个控件失效 —— 底下的终端区域也跟着重画，鼠标在标签和内容之间来回移动时会一直闪（用户实测报过）。现在按受影响的标签矩形 `Invalidate(rect)`，另外给 `TabControl` 反射打开 `DoubleBuffered`（它是 protected，只能用反射设），`Cursor` 也只在真的变了才赋。
+- **别用 `FindWindow(null, '标题')` 找自己的窗口**：从 PowerShell 传 `$null` 当第一个（类名）参数实测匹配不上、返回 0，于是"唤到前台"静默失效。单实例里改成 `EnumWindows` + `GetWindowTextW` 比标题（和诊断脚本里用的是同一套写法）。
 - 活动标签是**上半圆角的白块**（只圆上面两个角，下面跟内容区连成一片），所以启动器页的底色也改成了白色，不然中间会有一道缝。标签栏底色取 `HKCU\Software\Microsoft\Windows\DWM` 的 `AccentColor`（格式 `0xAABBGGRR`）跟白色混 14%，取不到就退回中性浅灰蓝。
 
 ### 已知限制

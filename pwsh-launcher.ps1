@@ -25,7 +25,9 @@ param(
   [string]$OpenShellScript = (Join-Path $PSScriptRoot 'open-shell.ps1'),
   # 所有会话都塞进这个「按名字定位」的 Windows Terminal 窗口的不同标签页；
   # 名字只是用来定位窗口的，不会显示在标题栏。想改成「标签页开到当前 WT 窗口」，把它换成 '0' 即可。
-  [string]$TerminalWindowName = 'pwsh-launcher'
+  [string]$TerminalWindowName = 'pwsh-launcher',
+  # 开机自启动时带上：最小化启动，不挡屏幕（点任务栏或桌面快捷方式就能恢复）
+  [switch]$StartMinimized
 )
 
 Set-StrictMode -Version Latest
@@ -281,6 +283,51 @@ function Start-PrefilledShell {
 
 # ---------------------------------------------------------------- 内置终端
 
+# ---------------------------------------------------------------- 单实例
+
+# 装了开机自启动之后，很容易出现「自启的那个已经在跑，你又双击了桌面快捷方式」——
+# 于是任务栏挂两个一模一样的启动器。这里用命名互斥体挡一下：
+# 已经在跑就把它的窗口唤到前台（最小化状态则先还原），本进程直接退出。
+# 注意：这个必须放在下面那些初始化（WebView2 环境、conpty 编译）之前，
+# 否则重复启动时要白等两秒才退出。
+# 【为什么不用 FindWindow(null, '标题')】实测从 PowerShell 调它时，那个 $null 的类名参数
+# 匹配不上（返回 0），窗口就白找。这里改成自己枚举顶层窗口比标题 —— 和其它诊断脚本里用的是同一套，稳定。
+Add-Type -Namespace PwshLauncher -Name Singleton -MemberDefinition @"
+public delegate bool EnumWindowsProc(IntPtr hWnd, IntPtr lParam);
+[DllImport("user32.dll")] public static extern bool EnumWindows(EnumWindowsProc cb, IntPtr lParam);
+[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern int GetWindowTextW(IntPtr hWnd, System.Text.StringBuilder text, int count);
+[DllImport("user32.dll")] public static extern bool IsWindowVisible(IntPtr hWnd);
+[DllImport("user32.dll")] public static extern bool IsIconic(IntPtr hWnd);
+[DllImport("user32.dll")] public static extern bool ShowWindowAsync(IntPtr hWnd, int nCmdShow);
+[DllImport("user32.dll")] public static extern bool SetForegroundWindow(IntPtr hWnd);
+"@
+$script:InstanceMutex = New-Object System.Threading.Mutex($false, 'Local\pwsh-launcher-single')
+if (-not $script:InstanceMutex.WaitOne(0)) {
+  try {
+    $script:ExistingWindow = [IntPtr]::Zero
+    $findCallback = [PwshLauncher.Singleton+EnumWindowsProc]{
+      param($hWnd, $lParam)
+      if ([PwshLauncher.Singleton]::IsWindowVisible($hWnd)) {
+        $sb = New-Object System.Text.StringBuilder 256
+        [void][PwshLauncher.Singleton]::GetWindowTextW($hWnd, $sb, 256)
+        if ($sb.ToString() -eq 'pwsh 启动器') {
+          $script:ExistingWindow = $hWnd
+          return $false   # 找到就停
+        }
+      }
+      return $true
+    }
+    [void][PwshLauncher.Singleton]::EnumWindows($findCallback, [IntPtr]::Zero)
+    if ($script:ExistingWindow -ne [IntPtr]::Zero) {
+      if ([PwshLauncher.Singleton]::IsIconic($script:ExistingWindow)) {
+        [void][PwshLauncher.Singleton]::ShowWindowAsync($script:ExistingWindow, 9)   # SW_RESTORE
+      }
+      [void][PwshLauncher.Singleton]::SetForegroundWindow($script:ExistingWindow)
+    }
+  } catch { }
+  exit
+}
+
 # 内置终端 = ConPTY（没有窗口的 pwsh）+ xterm.js（跑在 WebView2 里）。
 # 初始化必须赶在建任何窗口之前：WebView2 环境是同步等待创建的，
 # 等 UI 线程跑起来之后再阻塞会死锁。
@@ -306,6 +353,7 @@ $form.ClientSize = ScaleSize 1180 720
 $form.MinimumSize = ScaleSize 820 520
 $form.StartPosition = 'CenterScreen'
 try { $form.Font = New-Object System.Drawing.Font('Microsoft YaHei UI', 9) } catch { }
+if ($StartMinimized) { $form.WindowState = [System.Windows.Forms.FormWindowState]::Minimized }
 
 # 窗口图标：任务栏按钮取的就是这个（WM_SETICON），跟 .lnk 的图标是两回事。
 # 按 DPI 缩放后的 32px 去取对应尺寸的条目 —— 否则系统会拿 32px 的图放大到 40px（125% 下会糊）。
