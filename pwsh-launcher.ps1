@@ -30,6 +30,20 @@ param(
   [switch]$StartMinimized
 )
 
+class LauncherCommand {
+  [string]$Label
+  [string]$Command
+
+  LauncherCommand([string]$label, [string]$command) {
+    $this.Label = $label
+    $this.Command = $command
+  }
+
+  [string] ToString() {
+    return $this.Label
+  }
+}
+
 Set-StrictMode -Version Latest
 $ErrorActionPreference = 'Stop'
 
@@ -130,6 +144,7 @@ $script:ScriptPriority = @(
   'dist:win', 'dist:win:native', 'dist', 'package', 'release'
 )
 $script:MaxCommands = 14
+$script:ProjectCommandsFile = '.pwsh-launcher.json'
 
 $script:Folders = New-Object System.Collections.Generic.List[string]
 
@@ -172,6 +187,40 @@ function Save-FolderConfig {
 function Get-FolderCommands {
   param([string]$Directory)
 
+  # 项目自定义命令优先：在项目根目录放 .pwsh-launcher.json，
+  # 格式可以是 ["命令"]，也可以是 [{ "label": "显示名", "command": "实际命令" }]。
+  $customPath = Join-Path $Directory $script:ProjectCommandsFile
+  if (Test-Path -LiteralPath $customPath) {
+    try {
+      $config = Get-Content -LiteralPath $customPath -Raw -Encoding UTF8 | ConvertFrom-Json
+      $items = @()
+      foreach ($entry in @($config.commands)) {
+        if ($null -eq $entry) { continue }
+        if ($entry -is [string]) {
+          $value = [string]$entry
+          if (-not [string]::IsNullOrWhiteSpace($value)) {
+            $items += [LauncherCommand]::new($value, $value)
+          }
+          continue
+        }
+
+        $label = ''
+        $command = ''
+        if ($entry.PSObject.Properties['label']) { $label = [string]$entry.label }
+        if ($entry.PSObject.Properties['command']) { $command = [string]$entry.command }
+        if ([string]::IsNullOrWhiteSpace($command)) { continue }
+        if ([string]::IsNullOrWhiteSpace($label)) { $label = $command }
+        $items += [LauncherCommand]::new($label, $command)
+      }
+
+      if ($items.Count -gt 0) {
+        return @($items | Select-Object -First $script:MaxCommands)
+      }
+    } catch {
+      # 配置格式不对时退回 package.json/git 逻辑，避免启动器直接打不开。
+    }
+  }
+
   $pkgPath = Join-Path $Directory 'package.json'
   if (Test-Path -LiteralPath $pkgPath) {
     $names = @()
@@ -186,11 +235,14 @@ function Get-FolderCommands {
         if ($names -contains $p) { $ordered += $p }
       }
       $ordered += ($names | Where-Object { $ordered -notcontains $_ } | Sort-Object)
-      return @($ordered | Select-Object -First $script:MaxCommands | ForEach-Object { "npm run $_" })
+      return @($ordered | Select-Object -First $script:MaxCommands | ForEach-Object { [LauncherCommand]::new("npm run $_", "npm run $_") })
     }
   }
 
-  return @('git status -sb', 'git pull --ff-only')
+  return @(
+    [LauncherCommand]::new('git status -sb', 'git status -sb'),
+    [LauncherCommand]::new('git pull --ff-only', 'git pull --ff-only')
+  )
 }
 
 # ---------------------------------------------------------------- 开终端
@@ -541,7 +593,7 @@ $chkTip.SetToolTip($chkAdmin, "勾上之后用「以管理员身份运行」打�
 $flowLeft.Controls.AddRange(@($btnAdd, $btnRemove, $btnExplorer, $btnEmpty, $chkEmbedded, $chkAdmin))
 
 $lblCommands = New-Object System.Windows.Forms.Label
-$lblCommands.Text = '命令（来自该文件夹的 package.json）'
+$lblCommands.Text = '命令（项目自定义 / package.json）'
 $lblCommands.AutoSize = $true
 $lblCommands.Dock = 'Top'
 
@@ -578,6 +630,14 @@ function Get-SelectedFolder {
   return $script:Folders[$lstFolders.SelectedIndex]
 }
 
+function Get-CommandFromListItem {
+  param($Item)
+
+  if ($null -eq $Item) { return '' }
+  if ($Item -is [LauncherCommand]) { return [string]$Item.Command }
+  return [string]$Item
+}
+
 function Update-CommandList {
   $lstCommands.Items.Clear()
   $dir = Get-SelectedFolder
@@ -608,13 +668,13 @@ $lstFolders.add_SelectedIndexChanged({ Update-CommandList })
 $lstFolders.add_DoubleClick({
   $dir = Get-SelectedFolder
   if (-not $dir) { return }
-  $cmd = if ($lstCommands.Items.Count -gt 0) { [string]$lstCommands.Items[0] } else { '' }
+  $cmd = if ($lstCommands.Items.Count -gt 0) { Get-CommandFromListItem $lstCommands.Items[0] } else { '' }
   Start-PrefilledShell -Directory $dir -Command $cmd
 })
 
 $lstCommands.add_DoubleClick({
   $dir = Get-SelectedFolder
-  $cmd = if ($lstCommands.SelectedItem) { [string]$lstCommands.SelectedItem } else { '' }
+  $cmd = Get-CommandFromListItem $lstCommands.SelectedItem
   if (-not $dir) { return }
   Start-PrefilledShell -Directory $dir -Command $cmd
 })
@@ -674,7 +734,7 @@ $btnOpen.add_Click({
     [System.Windows.Forms.MessageBox]::Show('先在左边选一个文件夹。', 'pwsh 启动器', 'OK', 'Information') | Out-Null
     return
   }
-  $cmd = if ($lstCommands.SelectedItem) { [string]$lstCommands.SelectedItem } else { '' }
+  $cmd = Get-CommandFromListItem $lstCommands.SelectedItem
   Start-PrefilledShell -Directory $dir -Command $cmd
 })
 

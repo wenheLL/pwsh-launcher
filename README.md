@@ -9,8 +9,8 @@
 - 左边收藏常用文件夹（添加 / 删除 / 在资源管理器中打开 / 开空终端）
 - 左右两栏之间的分隔条**可以直接拖**（左栏最窄 220、右栏最窄 260，按 96 DPI 计）；启动时的默认比例写死在 `pwsh-launcher.ps1` 顶部的 `$script:DefaultSplitRatio`（当前 0.52，即左栏 52%），想换就改那一个数
 - 自带图标（`icon.ico`）：快捷方式和我们自己的任务栏按钮都用它
-- 右边命令**不用手工维护**：读该文件夹 `package.json` 的 `scripts` 生成，常用脚本排前面（dev → build → test → typecheck → lint → dist:win → dist → …），最多 14 条
-- 没有 `package.json` 就退回 `git status -sb` / `git pull --ff-only`
+- 右边命令优先读项目根目录的 `.pwsh-launcher.json`；没有该文件时再读 `package.json` 的 `scripts` 生成，常用脚本排前面（dev → build → test → typecheck → lint → dist:win → dist → …），最多 14 条
+- 两者都没有就退回 `git status -sb` / `git pull --ff-only`
 - 选中命令后双击或回车 → 新窗口里 `cd` 到该目录并预填命令，**按回车才执行**，执行前还能改
 - **内置终端**（默认）：会话长在启动器自己的标签页里，不需要 Windows Terminal，任务栏始终只有一个按钮
 - 标签栏是**仿 Chrome 的自绘样式**：浅色栏底（跟随系统强调色，跟 Chrome 自己的标签栏同色）+ 白色圆角活动标签 + 未选中标签之间的细分隔线，没有原生那种 3D 边框和阴影
@@ -69,6 +69,21 @@ pwsh -NoProfile -File .\install-autostart.ps1 -Uninstall   # 取消
 
 - 该文件按用户/机器本地生成，已被 `.gitignore` 忽略，不会提交。
 - 首次运行是空列表，界面上点「添加文件夹…」即可。
+
+项目自定义命令放在项目根目录的 `.pwsh-launcher.json`：
+
+```json
+{
+  "commands": [
+    { "label": "启动游戏", "command": ".\\start_game.bat" },
+    { "label": "打开编辑器", "command": ".\\start_editor.bat" },
+    "git status -sb"
+  ]
+}
+```
+
+- `commands` 里可以混用字符串和 `{ label, command }` 对象。
+- `label` 是列表里显示的文字，`command` 是终端里预填的命令。
 
 ## 三个脚本
 
