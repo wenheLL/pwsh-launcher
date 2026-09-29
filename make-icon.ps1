@@ -4,7 +4,7 @@
   生成 pwsh-launcher 的图标 icon.ico（多尺寸），画法全在代码里，改颜色/形状直接改这里再跑一次。
 
 .DESCRIPTION
-  设计：圆角方块 + 蓝色纵向渐变 + 白色终端提示符（>_）。
+  设计：圆角方块 + 黄绿色纵向渐变 + 白色终端提示符（>_）。
   为什么要多尺寸：16/24/32 是任务栏和标题栏用的，直接拿 256 缩下去会糊成一团；
   这里每个尺寸各画一遍，小尺寸还做了简化（<24 只留箭头，不然下划线挤成一坨）。
   容器格式：16~64 用传统 BMP(DIB) 条目，128/256 用 PNG 条目 —— 这是 Windows 自己产图标的做法。
@@ -43,8 +43,8 @@ function New-IconBitmap {
   $path.AddArc($rect.X, $rect.Bottom - $d, $d, $d, 90, 90)
   $path.CloseFigure()
 
-  $top = [System.Drawing.Color]::FromArgb(255, 84, 164, 255)
-  $bottom = [System.Drawing.Color]::FromArgb(255, 22, 74, 190)
+  $top = [System.Drawing.Color]::FromArgb(255, 188, 226, 45)
+  $bottom = [System.Drawing.Color]::FromArgb(255, 104, 158, 16)
   $brush = New-Object System.Drawing.Drawing2D.LinearGradientBrush($rect, $top, $bottom, 90.0)
   $g.FillPath($brush, $path)
 
